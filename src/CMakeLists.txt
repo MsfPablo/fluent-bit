@@ -122,6 +122,7 @@ set(src
   ${src}
   opentelemetry/flb_opentelemetry_logs.c
   opentelemetry/flb_opentelemetry_metrics.c
+  opentelemetry/flb_opentelemetry_metrics_batch.c
   opentelemetry/flb_opentelemetry_otlp_json.c
   opentelemetry/flb_opentelemetry_otlp_proto.c
   opentelemetry/flb_opentelemetry_traces.c

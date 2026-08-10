@@ -95,6 +95,16 @@ struct flb_otel_error_map {
 
 struct cmt;
 struct ctrace;
+
+struct flb_opentelemetry_metrics_proto_batch {
+    flb_sds_t payload;
+    size_t data_point_count;
+};
+
+struct flb_opentelemetry_metrics_proto_batches {
+    size_t count;
+    struct flb_opentelemetry_metrics_proto_batch *entries;
+};
 struct flb_log_event;
 
 enum flb_opentelemetry_otlp_json_result {
@@ -262,6 +272,31 @@ flb_sds_t flb_opentelemetry_metrics_to_otlp_proto(struct cmt *context,
 flb_sds_t flb_opentelemetry_metrics_msgpack_to_otlp_proto(const void *data,
                                                           size_t size,
                                                           int *result);
+
+/*
+ * Split an encoded OTLP ExportMetricsServiceRequest without changing metric,
+ * resource, or scope metadata. A zero limit returns the original request as a
+ * single batch. The returned payloads are owned by the batch collection.
+ */
+struct flb_opentelemetry_metrics_proto_batches *
+flb_opentelemetry_metrics_proto_batches_create(const void *payload,
+                                               size_t payload_size,
+                                               size_t max_data_points,
+                                               int *result);
+
+struct flb_opentelemetry_metrics_proto_batches *
+flb_opentelemetry_metrics_to_otlp_proto_batches(struct cmt *context,
+                                                size_t max_data_points,
+                                                int *result);
+
+struct flb_opentelemetry_metrics_proto_batches *
+flb_opentelemetry_metrics_msgpack_to_otlp_proto_batches(const void *data,
+                                                        size_t size,
+                                                        size_t max_data_points,
+                                                        int *result);
+
+void flb_opentelemetry_metrics_proto_batches_destroy(
+    struct flb_opentelemetry_metrics_proto_batches *batches);
 
 flb_sds_t flb_opentelemetry_logs_to_otlp_proto(const void *event_chunk_data,
                                                size_t event_chunk_size,
