@@ -2706,6 +2706,391 @@ void test_opentelemetry_metrics_msgpack_otlp_proto_merges_contexts()
     destroy_metrics_context_list(&contexts);
 }
 
+void test_opentelemetry_metrics_otlp_proto_data_point_batches()
+{
+    int index;
+    int result;
+    int ret;
+    int seen[11];
+    size_t batch_index;
+    size_t resource_index;
+    size_t scope_index;
+    size_t metric_index;
+    size_t point_index;
+    size_t total_data_points;
+    uint64_t timestamp;
+    char *label_keys[] = {"series"};
+    char *label_values[1];
+    char *series[] = {
+        "series-0", "series-1", "series-2", "series-3", "series-4", "series-5",
+        "series-6", "series-7", "series-8", "series-9", "series-10"
+    };
+    struct cmt *context;
+    struct cmt_gauge *gauge;
+    struct flb_opentelemetry_metrics_proto_batches *batches;
+    Opentelemetry__Proto__Metrics__V1__Metric *metric;
+    Opentelemetry__Proto__Metrics__V1__ScopeMetrics *scope;
+    Opentelemetry__Proto__Metrics__V1__ResourceMetrics *resource;
+    Opentelemetry__Proto__Metrics__V1__NumberDataPoint *point;
+    Opentelemetry__Proto__Collector__Metrics__V1__ExportMetricsServiceRequest *decoded;
+
+    memset(seen, 0, sizeof(seen));
+    context = cmt_create();
+    TEST_CHECK(context != NULL);
+    if (context == NULL) {
+        return;
+    }
+
+    gauge = cmt_gauge_create(context,
+                             "test",
+                             "batch",
+                             "value",
+                             "batching test",
+                             1,
+                             label_keys);
+    TEST_CHECK(gauge != NULL);
+    if (gauge == NULL) {
+        cmt_destroy(context);
+        return;
+    }
+
+    for (index = 0; index < 11; index++) {
+        label_values[0] = series[index];
+        ret = cmt_gauge_set(gauge,
+                            (uint64_t) index + 1,
+                            (double) index,
+                            1,
+                            label_values);
+        TEST_CHECK(ret == 0);
+    }
+
+    batches = flb_opentelemetry_metrics_to_otlp_proto_batches(context, 4, &result);
+    TEST_CHECK(result == FLB_OPENTELEMETRY_OTLP_PROTO_SUCCESS);
+    TEST_CHECK(batches != NULL);
+    if (batches == NULL) {
+        cmt_destroy(context);
+        return;
+    }
+
+    TEST_CHECK(batches->count == 3);
+    TEST_CHECK(batches->entries[0].data_point_count == 4);
+    TEST_CHECK(batches->entries[1].data_point_count == 4);
+    TEST_CHECK(batches->entries[2].data_point_count == 3);
+
+    total_data_points = 0;
+    for (batch_index = 0; batch_index < batches->count; batch_index++) {
+        decoded =
+            opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__unpack(
+                NULL,
+                flb_sds_len(batches->entries[batch_index].payload),
+                (uint8_t *) batches->entries[batch_index].payload);
+        TEST_CHECK(decoded != NULL);
+        if (decoded == NULL) {
+            continue;
+        }
+
+        for (resource_index = 0;
+             resource_index < decoded->n_resource_metrics;
+             resource_index++) {
+            resource = decoded->resource_metrics[resource_index];
+            for (scope_index = 0; scope_index < resource->n_scope_metrics; scope_index++) {
+                scope = resource->scope_metrics[scope_index];
+                for (metric_index = 0; metric_index < scope->n_metrics; metric_index++) {
+                    metric = scope->metrics[metric_index];
+                    TEST_CHECK(metric->data_case ==
+                               OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_GAUGE);
+                    if (metric->data_case !=
+                        OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_GAUGE) {
+                        continue;
+                    }
+
+                    for (point_index = 0;
+                         point_index < metric->gauge->n_data_points;
+                         point_index++) {
+                        point = metric->gauge->data_points[point_index];
+                        timestamp = point->time_unix_nano;
+                        TEST_CHECK(timestamp >= 1 && timestamp <= 11);
+                        if (timestamp >= 1 && timestamp <= 11) {
+                            seen[timestamp - 1]++;
+                        }
+                        total_data_points++;
+                    }
+                }
+            }
+        }
+
+        opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__free_unpacked(
+            decoded,
+            NULL);
+    }
+
+    TEST_CHECK(total_data_points == 11);
+    for (index = 0; index < 11; index++) {
+        TEST_CHECK(seen[index] == 1);
+    }
+
+    flb_opentelemetry_metrics_proto_batches_destroy(batches);
+
+    batches = flb_opentelemetry_metrics_to_otlp_proto_batches(context, 11, &result);
+    TEST_CHECK(result == FLB_OPENTELEMETRY_OTLP_PROTO_SUCCESS);
+    TEST_CHECK(batches != NULL);
+    if (batches != NULL) {
+        TEST_CHECK(batches->count == 1);
+        TEST_CHECK(batches->entries[0].data_point_count == 11);
+        flb_opentelemetry_metrics_proto_batches_destroy(batches);
+    }
+
+    batches = flb_opentelemetry_metrics_to_otlp_proto_batches(context, 0, &result);
+    TEST_CHECK(result == FLB_OPENTELEMETRY_OTLP_PROTO_SUCCESS);
+    TEST_CHECK(batches != NULL);
+    if (batches != NULL) {
+        TEST_CHECK(batches->count == 1);
+        TEST_CHECK(batches->entries[0].data_point_count == 11);
+        flb_opentelemetry_metrics_proto_batches_destroy(batches);
+    }
+
+    cmt_destroy(context);
+
+    batches = flb_opentelemetry_metrics_proto_batches_create("invalid", 7, 4, &result);
+    TEST_CHECK(batches == NULL);
+    TEST_CHECK(result == FLB_OPENTELEMETRY_OTLP_PROTO_INVALID_ARGUMENT);
+}
+
+void test_opentelemetry_metrics_otlp_proto_batches_all_metric_types()
+{
+    int result;
+    int gauge_seen;
+    int sum_seen;
+    int histogram_seen;
+    int exp_histogram_seen;
+    int summary_seen;
+    size_t payload_size;
+    size_t batch_index;
+    size_t resource_index;
+    size_t scope_index;
+    size_t metric_index;
+    size_t total_data_points;
+    flb_sds_t payload;
+    Opentelemetry__Proto__Metrics__V1__Metric *metric;
+    Opentelemetry__Proto__Metrics__V1__Metric metrics[5];
+    Opentelemetry__Proto__Metrics__V1__Metric *metric_entries[5];
+    Opentelemetry__Proto__Metrics__V1__Gauge gauge;
+    Opentelemetry__Proto__Metrics__V1__Sum sum;
+    Opentelemetry__Proto__Metrics__V1__Histogram histogram;
+    Opentelemetry__Proto__Metrics__V1__ExponentialHistogram exp_histogram;
+    Opentelemetry__Proto__Metrics__V1__Summary summary;
+    Opentelemetry__Proto__Metrics__V1__NumberDataPoint gauge_point;
+    Opentelemetry__Proto__Metrics__V1__NumberDataPoint sum_point;
+    Opentelemetry__Proto__Metrics__V1__NumberDataPoint *gauge_points[1];
+    Opentelemetry__Proto__Metrics__V1__NumberDataPoint *sum_points[1];
+    Opentelemetry__Proto__Metrics__V1__HistogramDataPoint histogram_point;
+    Opentelemetry__Proto__Metrics__V1__HistogramDataPoint *histogram_points[1];
+    Opentelemetry__Proto__Metrics__V1__ExponentialHistogramDataPoint exp_histogram_point;
+    Opentelemetry__Proto__Metrics__V1__ExponentialHistogramDataPoint *exp_histogram_points[1];
+    Opentelemetry__Proto__Metrics__V1__SummaryDataPoint summary_point;
+    Opentelemetry__Proto__Metrics__V1__SummaryDataPoint *summary_points[1];
+    Opentelemetry__Proto__Metrics__V1__ScopeMetrics scope;
+    Opentelemetry__Proto__Metrics__V1__ScopeMetrics *scopes[1];
+    Opentelemetry__Proto__Metrics__V1__ResourceMetrics resource;
+    Opentelemetry__Proto__Metrics__V1__ResourceMetrics *resources[1];
+    Opentelemetry__Proto__Collector__Metrics__V1__ExportMetricsServiceRequest request;
+    Opentelemetry__Proto__Collector__Metrics__V1__ExportMetricsServiceRequest *decoded;
+    struct flb_opentelemetry_metrics_proto_batches *batches;
+
+    opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__init(
+        &request);
+    opentelemetry__proto__metrics__v1__resource_metrics__init(&resource);
+    opentelemetry__proto__metrics__v1__scope_metrics__init(&scope);
+    opentelemetry__proto__metrics__v1__gauge__init(&gauge);
+    opentelemetry__proto__metrics__v1__sum__init(&sum);
+    opentelemetry__proto__metrics__v1__histogram__init(&histogram);
+    opentelemetry__proto__metrics__v1__exponential_histogram__init(&exp_histogram);
+    opentelemetry__proto__metrics__v1__summary__init(&summary);
+    opentelemetry__proto__metrics__v1__number_data_point__init(&gauge_point);
+    opentelemetry__proto__metrics__v1__number_data_point__init(&sum_point);
+    opentelemetry__proto__metrics__v1__histogram_data_point__init(&histogram_point);
+    opentelemetry__proto__metrics__v1__exponential_histogram_data_point__init(
+        &exp_histogram_point);
+    opentelemetry__proto__metrics__v1__summary_data_point__init(&summary_point);
+
+    for (metric_index = 0; metric_index < 5; metric_index++) {
+        opentelemetry__proto__metrics__v1__metric__init(&metrics[metric_index]);
+        metric_entries[metric_index] = &metrics[metric_index];
+    }
+
+    gauge_points[0] = &gauge_point;
+    gauge.n_data_points = 1;
+    gauge.data_points = gauge_points;
+    metrics[0].name = "gauge";
+    metrics[0].data_case = OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_GAUGE;
+    metrics[0].gauge = &gauge;
+
+    sum_points[0] = &sum_point;
+    sum.n_data_points = 1;
+    sum.data_points = sum_points;
+    metrics[1].name = "sum";
+    metrics[1].data_case = OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_SUM;
+    metrics[1].sum = &sum;
+
+    histogram_points[0] = &histogram_point;
+    histogram.n_data_points = 1;
+    histogram.data_points = histogram_points;
+    metrics[2].name = "histogram";
+    metrics[2].data_case = OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_HISTOGRAM;
+    metrics[2].histogram = &histogram;
+
+    exp_histogram_points[0] = &exp_histogram_point;
+    exp_histogram.n_data_points = 1;
+    exp_histogram.data_points = exp_histogram_points;
+    metrics[3].name = "exponential_histogram";
+    metrics[3].data_case =
+        OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_EXPONENTIAL_HISTOGRAM;
+    metrics[3].exponential_histogram = &exp_histogram;
+
+    summary_points[0] = &summary_point;
+    summary.n_data_points = 1;
+    summary.data_points = summary_points;
+    metrics[4].name = "summary";
+    metrics[4].data_case = OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_SUMMARY;
+    metrics[4].summary = &summary;
+
+    scope.n_metrics = 5;
+    scope.metrics = metric_entries;
+    scopes[0] = &scope;
+    resource.n_scope_metrics = 1;
+    resource.scope_metrics = scopes;
+    resources[0] = &resource;
+    request.n_resource_metrics = 1;
+    request.resource_metrics = resources;
+
+    payload_size =
+        opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__get_packed_size(
+            &request);
+    payload = flb_sds_create_size(payload_size);
+    TEST_CHECK(payload != NULL);
+    if (payload == NULL) {
+        return;
+    }
+
+    opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__pack(
+        &request,
+        (uint8_t *) payload);
+    flb_sds_len_set(payload, payload_size);
+
+    batches = flb_opentelemetry_metrics_proto_batches_create(payload,
+                                                             payload_size,
+                                                             2,
+                                                             &result);
+    flb_sds_destroy(payload);
+    TEST_CHECK(result == FLB_OPENTELEMETRY_OTLP_PROTO_SUCCESS);
+    TEST_CHECK(batches != NULL);
+    if (batches == NULL) {
+        return;
+    }
+
+    TEST_CHECK(batches->count == 3);
+    TEST_CHECK(batches->entries[0].data_point_count == 2);
+    TEST_CHECK(batches->entries[1].data_point_count == 2);
+    TEST_CHECK(batches->entries[2].data_point_count == 1);
+
+    gauge_seen = 0;
+    sum_seen = 0;
+    histogram_seen = 0;
+    exp_histogram_seen = 0;
+    summary_seen = 0;
+    total_data_points = 0;
+
+    for (batch_index = 0; batch_index < batches->count; batch_index++) {
+        decoded =
+            opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__unpack(
+                NULL,
+                flb_sds_len(batches->entries[batch_index].payload),
+                (uint8_t *) batches->entries[batch_index].payload);
+        TEST_CHECK(decoded != NULL);
+        if (decoded == NULL) {
+            continue;
+        }
+
+        for (resource_index = 0;
+             resource_index < decoded->n_resource_metrics;
+             resource_index++) {
+            resource = *decoded->resource_metrics[resource_index];
+            for (scope_index = 0;
+                 scope_index < resource.n_scope_metrics;
+                 scope_index++) {
+                scope = *resource.scope_metrics[scope_index];
+                for (metric_index = 0; metric_index < scope.n_metrics; metric_index++) {
+                    metric = scope.metrics[metric_index];
+                    if (metric->data_case ==
+                        OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_GAUGE) {
+                        gauge_seen++;
+                        total_data_points += metric->gauge->n_data_points;
+                    }
+                    else if (metric->data_case ==
+                             OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_SUM) {
+                        sum_seen++;
+                        total_data_points += metric->sum->n_data_points;
+                    }
+                    else if (metric->data_case ==
+                             OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_HISTOGRAM) {
+                        histogram_seen++;
+                        total_data_points += metric->histogram->n_data_points;
+                    }
+                    else if (metric->data_case ==
+                             OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_EXPONENTIAL_HISTOGRAM) {
+                        exp_histogram_seen++;
+                        total_data_points += metric->exponential_histogram->n_data_points;
+                    }
+                    else if (metric->data_case ==
+                             OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_SUMMARY) {
+                        summary_seen++;
+                        total_data_points += metric->summary->n_data_points;
+                    }
+                }
+            }
+        }
+
+        opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__free_unpacked(
+            decoded,
+            NULL);
+    }
+
+    TEST_CHECK(total_data_points == 5);
+    TEST_CHECK(gauge_seen == 1);
+    TEST_CHECK(sum_seen == 1);
+    TEST_CHECK(histogram_seen == 1);
+    TEST_CHECK(exp_histogram_seen == 1);
+    TEST_CHECK(summary_seen == 1);
+
+    flb_opentelemetry_metrics_proto_batches_destroy(batches);
+}
+
+void test_opentelemetry_metrics_otlp_proto_batches_empty_context()
+{
+    int result;
+    struct cmt *context;
+    struct flb_opentelemetry_metrics_proto_batches *batches;
+
+    context = cmt_create();
+    TEST_CHECK(context != NULL);
+    if (context == NULL) {
+        return;
+    }
+
+    batches = flb_opentelemetry_metrics_to_otlp_proto_batches(context, 4, &result);
+    TEST_CHECK(result == FLB_OPENTELEMETRY_OTLP_PROTO_SUCCESS);
+    TEST_CHECK(batches != NULL);
+    if (batches != NULL) {
+        TEST_CHECK(batches->count <= 1);
+        if (batches->count == 1) {
+            TEST_CHECK(batches->entries[0].data_point_count == 0);
+        }
+        flb_opentelemetry_metrics_proto_batches_destroy(batches);
+    }
+
+    cmt_destroy(context);
+}
+
 void test_opentelemetry_traces_otlp_proto_roundtrip()
 {
     int result;
@@ -2780,5 +3165,11 @@ TEST_LIST = {
       test_opentelemetry_metrics_otlp_proto_roundtrip },
     { "opentelemetry_metrics_msgpack_otlp_proto_merges_contexts",
       test_opentelemetry_metrics_msgpack_otlp_proto_merges_contexts },
+    { "opentelemetry_metrics_otlp_proto_data_point_batches",
+      test_opentelemetry_metrics_otlp_proto_data_point_batches },
+    { "opentelemetry_metrics_otlp_proto_batches_all_metric_types",
+      test_opentelemetry_metrics_otlp_proto_batches_all_metric_types },
+    { "opentelemetry_metrics_otlp_proto_batches_empty_context",
+      test_opentelemetry_metrics_otlp_proto_batches_empty_context },
     { 0 }
 };
