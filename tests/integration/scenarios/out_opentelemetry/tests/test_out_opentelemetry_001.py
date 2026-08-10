@@ -538,6 +538,7 @@ def _build_batched_metrics_payload():
 
     def resource(service_name, metric):
         return {
+            "schema_url": f"https://example.com/resource/{service_name}/1.0.0",
             "resource": {
                 "attributes": [
                     {
@@ -551,9 +552,10 @@ def _build_batched_metrics_payload():
             "scope_metrics": [
                 {
                     "scope": {
-                        "name": "batch-test",
+                        "name": f"batch-test-{service_name}",
                         "version": "1.0.0",
                     },
+                    "schema_url": f"https://example.com/scope/{service_name}/1.0.0",
                     "metrics": [metric],
                 }
             ],
@@ -610,12 +612,21 @@ def iter_metric_points_with_resource(output):
         resource_attributes = _attributes_to_dict(
             resource_metric.get("resource", {}).get("attributes", [])
         )
+        resource_schema_url = resource_metric.get("schemaUrl")
         for scope_metric in resource_metric.get("scopeMetrics", []):
+            scope = scope_metric.get("scope", {})
+            scope_schema_url = scope_metric.get("schemaUrl")
             for metric in scope_metric.get("metrics", []):
                 for data_key in data_keys:
                     if data_key in metric:
                         for point in metric[data_key].get("dataPoints", []):
-                            yield point, resource_attributes
+                            yield (
+                                point,
+                                resource_attributes,
+                                resource_schema_url,
+                                scope,
+                                scope_schema_url,
+                            )
                         break
 
 
@@ -992,11 +1003,29 @@ def test_out_opentelemetry_metrics_max_datapoints(
         batch_sizes.append(len(points))
         assert len(points) <= 4
 
-        for point, resource_attributes in points:
+        for (
+            point,
+            resource_attributes,
+            resource_schema_url,
+            scope,
+            scope_schema_url,
+        ) in points:
             point_attributes = _attributes_to_dict(point.get("attributes", []))
             series_id = int(point_attributes["series.id"])
             assert series_id not in observed_series
-            observed_series[series_id] = resource_attributes["service.name"]
+            service_name = "service-a" if series_id < 7 else "service-b"
+            assert resource_attributes["service.name"] == service_name
+            assert resource_schema_url == (
+                f"https://example.com/resource/{service_name}/1.0.0"
+            )
+            assert scope == {
+                "name": f"batch-test-{service_name}",
+                "version": "1.0.0",
+            }
+            assert scope_schema_url == (
+                f"https://example.com/scope/{service_name}/1.0.0"
+            )
+            observed_series[series_id] = service_name
 
     assert sorted(batch_sizes) == [3, 4, 4]
     assert observed_series == {
@@ -1008,8 +1037,9 @@ def test_out_opentelemetry_metrics_max_datapoints(
 def test_out_opentelemetry_metrics_partial_success_is_not_retried():
     payload = _build_batched_metrics_payload()
     resource_metrics = payload["resource_metrics"]
-    resource_metrics[0]["scope_metrics"][0]["metrics"].extend(
-        resource_metrics[1]["scope_metrics"][0]["metrics"]
+    gauge_points = resource_metrics[0]["scope_metrics"][0]["metrics"][0]["gauge"]
+    gauge_points["data_points"].extend(
+        resource_metrics[1]["scope_metrics"][0]["metrics"][0]["sum"]["data_points"]
     )
     payload["resource_metrics"] = [resource_metrics[0]]
 
@@ -1031,15 +1061,17 @@ def test_out_opentelemetry_metrics_partial_success_is_not_retried():
     for export_request in metrics_seen:
         output = json.loads(json_format.MessageToJson(export_request))
         points = list(iter_metric_points_with_resource(output))
-        assert len(points) <= 4
+        assert len(points) == 4
         batch_series.append(
             {
                 int(_attributes_to_dict(point.get("attributes", []))["series.id"])
-                for point, _ in points
+                for point, _, _, _, _ in points
             }
         )
 
-    assert batch_series[0].isdisjoint(batch_series[1])
+    assert batch_series[0] == {0, 1, 2, 3}
+    assert batch_series[1] == {4, 5, 6, 7}
+    assert {8, 9, 10}.isdisjoint(set().union(*batch_series))
 
 
 def test_out_opentelemetry_traces_uri():
