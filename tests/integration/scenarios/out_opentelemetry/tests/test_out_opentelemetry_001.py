@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import os
+import shutil
 import socket
 import threading
 
@@ -812,6 +813,10 @@ def test_out_opentelemetry_gzip_and_logs_body_key_attributes():
     assert "message" not in attributes
 
 
+@pytest.mark.skipif(
+    shutil.which("zstd") is None,
+    reason="zstd executable is required to decode the test payload",
+)
 def test_out_opentelemetry_zstd_and_logs_body_key_attributes():
     service = Service("out_otel_http_logs_zstd.yaml")
     service.start()
